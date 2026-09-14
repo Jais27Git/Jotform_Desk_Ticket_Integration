@@ -22,7 +22,7 @@ from urllib3.util.retry import Retry
 
 
 # ============================================================
-# CONFIGURATION (HARDCODED CREDENTIALS)
+# CONFIGURATION (LOADED VIA ENVIRONMENT VARIABLES)
 # ============================================================
 
 JOTFORM_API_KEY = os.environ["JOTFORM_API_KEY"]
@@ -71,10 +71,11 @@ INDEX_HEADERS = [
 
 
 # ============================================================
-# GOOGLE SERVICE ACCOUNT (HARDCODED)
+# GOOGLE SERVICE ACCOUNT (LOADED VIA ENVIRONMENT VARIABLE)
 # ============================================================
 
 SERVICE_ACCOUNT_INFO = json.loads(os.environ["SERVICE_ACCOUNT_INFO"])
+
 
 # ============================================================
 # HTTP SESSION
@@ -282,10 +283,6 @@ def get_or_create_index_worksheet(spreadsheet):
 
 
 def load_cached_index_from_sheet(index_ws):
-    """
-    Dynamically maps columns by exact header names.
-    Guarantees 'IS CLOSED' boolean can never be read into 'CREATED AT'.
-    """
     all_rows = index_ws.get_all_values()
     lead_ticket_map = {}
     known_ticket_ids = set()
@@ -302,7 +299,6 @@ def load_cached_index_from_sheet(index_ws):
     lead_id_col = col_idx.get("LEAD ID", 2)
     title_col = col_idx.get("TITLE", 3)
     
-    # Header check for Created At
     created_at_col = col_idx.get("CREATED AT (IST)", col_idx.get("CREATED AT", 4))
     raw_created_col = col_idx.get("RAW CREATED AT", 5)
     is_closed_col = col_idx.get("IS CLOSED", 6)
@@ -322,14 +318,13 @@ def load_cached_index_from_sheet(index_ws):
         raw_created_at = str(row[raw_created_col]).strip() if raw_created_col < len(row) else ""
         created_at_cell = str(row[created_at_col]).strip() if created_at_col < len(row) else ""
 
-        # Reject 'FALSE', 'TRUE', or boolean string corruption
+        # Reject boolean string corruption
         if created_at_cell.upper() in {"FALSE", "TRUE"}:
             created_at_cell = ""
         if raw_created_at.upper() in {"FALSE", "TRUE"}:
             raw_created_at = ""
 
         created_at_fmt = format_faveo_created_at(raw_created_at or created_at_cell)
-
         is_closed_val = (str(row[is_closed_col]).strip().lower() == "true") if is_closed_col < len(row) else False
 
         ticket_item = {
@@ -417,7 +412,6 @@ def sync_faveo_index_incremental(spreadsheet, index_ws):
 
                 lead_key = match.group().upper() if match else ""
 
-                # Strictly format Faveo UTC timestamp to IST
                 raw_created = clean_answer(t.get("created_at"))
                 created_at_fmt = format_faveo_created_at(raw_created)
 
@@ -545,7 +539,7 @@ def close_faveo_ticket(ticket_id):
 
 
 # ============================================================
-# JOTFORM SUBMISSIONS
+# JOTFORM SUBMISSIONS (FIXED PARAMS & VISIBILITY)
 # ============================================================
 
 def fetch_eligible_submissions(start_lead_no=START_LEAD_NO):
@@ -556,15 +550,15 @@ def fetch_eligible_submissions(start_lead_no=START_LEAD_NO):
     print(f"Scanning Jotform submissions for Leads >= {start_lead_no}...")
 
     while True:
-        url = (
-            f"https://api.jotform.com/form/{FORM_ID}/submissions"
-            f"?apiKey={JOTFORM_API_KEY}"
-            f"&limit={JOTFORM_PAGE_SIZE}"
-            f"&offset={offset}"
-        )
+        url = f"https://api.jotform.com/form/{FORM_ID}/submissions"
+        params = {
+            "apiKey": JOTFORM_API_KEY,
+            "limit": JOTFORM_PAGE_SIZE,
+            "offset": offset
+        }
 
         try:
-            response = SESSION.get(url, timeout=REQUEST_TIMEOUT)
+            response = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
         except requests.RequestException as e:
             print(f"JotForm request failed: {e}")
             break
@@ -589,7 +583,11 @@ def fetch_eligible_submissions(start_lead_no=START_LEAD_NO):
 
             answers = submission.get("answers", {})
             lead_answer = answers.get("251", {})
-            lead_value = clean_answer(lead_answer.get("answer", "")) if isinstance(lead_answer, dict) else clean_answer(lead_answer)
+            lead_value = (
+                clean_answer(lead_answer.get("answer", ""))
+                if isinstance(lead_answer, dict)
+                else clean_answer(lead_answer)
+            )
             lead_number = extract_lead_number(lead_value)
 
             if lead_number is not None and lead_number >= start_lead_no:
@@ -606,10 +604,11 @@ def fetch_eligible_submissions(start_lead_no=START_LEAD_NO):
 
 
 def get_submission_data(submission_id):
-    url = (
-        f"https://www.jotform.com/API/inbox/submission/{submission_id}"
-        f"?addWorkflowStatus=1&addThread=1"
-    )
+    url = f"https://www.jotform.com/API/inbox/submission/{submission_id}"
+    params = {
+        "addWorkflowStatus": "1",
+        "addThread": "1"
+    }
 
     headers = {
         "APIKEY": JOTFORM_API_KEY,
@@ -621,9 +620,11 @@ def get_submission_data(submission_id):
     try:
         response = SESSION.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
+            print(f"       ⚠️ Submission {submission_id} returned HTTP {response.status_code}")
             return None
         payload = response.json()
-    except Exception:
+    except Exception as e:
+        print(f"       ❌ Error reading submission {submission_id}: {e}")
         return None
 
     content = payload.get("content", {})
@@ -786,7 +787,7 @@ def run_sync():
         lead_key = lead_id.strip().upper()
         tickets_for_lead = faveo_lead_map.get(lead_key, [])
 
-        # Fallback: if webhook ticket is missing or has a corrupted timestamp, fetch directly from Faveo
+        # Fallback: if webhook ticket is missing or has an invalid timestamp, fetch directly from Faveo
         if webhook_tid:
             found_ticket = next((t for t in tickets_for_lead if str(t.get("f_data_id")) == str(webhook_tid)), None)
             if not found_ticket or not found_ticket.get("created_at"):
