@@ -1,0 +1,38 @@
+name: JotForm to Faveo Sheet Sync
+
+on:
+  schedule:
+    # Runs every 15 minutes (UTC)
+    - cron: "*/30 * * * *"
+  workflow_dispatch: # Enables manual "Run workflow" button in GitHub Actions tab
+
+concurrency:
+  group: faveo-sheet-sync
+  cancel-in-progress: false
+
+jobs:
+  run-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Sync Script
+        env:
+          JOTFORM_API_KEY: ${{ secrets.JOTFORM_API_KEY }}
+          FAVEO_TOKEN: ${{ secrets.FAVEO_TOKEN }}
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          PYTHONUNBUFFERED: "1"
+        run: python JotformDeskSync.py
