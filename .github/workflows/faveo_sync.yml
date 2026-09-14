@@ -33,6 +33,6 @@ jobs:
         env:
           JOTFORM_API_KEY: ${{ secrets.JOTFORM_API_KEY }}
           FAVEO_TOKEN: ${{ secrets.FAVEO_TOKEN }}
-          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SERVICE_ACCOUNT_INFO: ${{ secrets.SERVICE_ACCOUNT_INFO }}
           PYTHONUNBUFFERED: "1"
         run: python JotformDeskSync.py
