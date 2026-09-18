@@ -111,9 +111,8 @@ def get_ist_time():
 
 def format_faveo_created_at(raw_value):
     """
-    Converts Faveo UTC timestamps (e.g. '2026-09-02T11:20:27.000000Z')
+    Converts Faveo UTC timestamps (e.g. '2026-09-14T08:18:07.000000Z')
     strictly into Asia/Kolkata IST format ('%d-%m-%Y %H:%M:%S').
-    Rejects 'FALSE', 'TRUE', or boolean values.
     """
     if not raw_value or isinstance(raw_value, bool):
         return ""
@@ -122,7 +121,6 @@ def format_faveo_created_at(raw_value):
     if not val or val.upper() in {"FALSE", "TRUE", "NONE", "NULL"}:
         return ""
 
-    # Parse UTC string ending in 'Z'
     if val.endswith("Z"):
         try:
             dt_utc = datetime.fromisoformat(val.replace("Z", "+00:00"))
@@ -131,7 +129,6 @@ def format_faveo_created_at(raw_value):
         except Exception:
             pass
 
-    # Parse ISO offset string (+05:30, etc.)
     if ("+" in val[10:]) or ("-" in val[10:]):
         try:
             dt = datetime.fromisoformat(val)
@@ -140,7 +137,6 @@ def format_faveo_created_at(raw_value):
         except Exception:
             pass
 
-    # Standard SQL / DateTime formats
     formats = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S.%f",
@@ -269,7 +265,7 @@ def check_jotform_eligibility(content):
 
 
 # ============================================================
-# GOOGLE SHEET TICKET INDEX MANAGEMENT (WITH RESILIENT MAPPING)
+# GOOGLE SHEET TICKET INDEX MANAGEMENT
 # ============================================================
 
 def get_or_create_index_worksheet(spreadsheet):
@@ -283,6 +279,10 @@ def get_or_create_index_worksheet(spreadsheet):
 
 
 def load_cached_index_from_sheet(index_ws):
+    """
+    Dynamically maps columns by exact header names.
+    Guarantees no column shifts.
+    """
     all_rows = index_ws.get_all_values()
     lead_ticket_map = {}
     known_ticket_ids = set()
@@ -298,7 +298,6 @@ def load_cached_index_from_sheet(index_ws):
     ticket_no_col = col_idx.get("TICKET NUMBER", 1)
     lead_id_col = col_idx.get("LEAD ID", 2)
     title_col = col_idx.get("TITLE", 3)
-    
     created_at_col = col_idx.get("CREATED AT (IST)", col_idx.get("CREATED AT", 4))
     raw_created_col = col_idx.get("RAW CREATED AT", 5)
     is_closed_col = col_idx.get("IS CLOSED", 6)
@@ -314,11 +313,10 @@ def load_cached_index_from_sheet(index_ws):
         tnum = str(row[ticket_no_col]).strip() if ticket_no_col < len(row) else ""
         lead_key = str(row[lead_id_col]).strip().upper() if lead_id_col < len(row) else ""
         t_title = str(row[title_col]).strip() if title_col < len(row) else ""
-        
+
         raw_created_at = str(row[raw_created_col]).strip() if raw_created_col < len(row) else ""
         created_at_cell = str(row[created_at_col]).strip() if created_at_col < len(row) else ""
 
-        # Reject boolean string corruption
         if created_at_cell.upper() in {"FALSE", "TRUE"}:
             created_at_cell = ""
         if raw_created_at.upper() in {"FALSE", "TRUE"}:
@@ -466,7 +464,7 @@ def sync_faveo_index_incremental(spreadsheet, index_ws):
 
 
 # ============================================================
-# FAVEO TICKET DETAILS (FOR DIRECT FALLBACK LOOKUP)
+# FAVEO TICKET DETAILS & ACTIONS
 # ============================================================
 
 def get_faveo_ticket_details(ticket_id):
@@ -509,10 +507,12 @@ def get_faveo_ticket_details(ticket_id):
     created_at_fmt = format_faveo_created_at(raw_created)
 
     is_closed = (status_id == str(CLOSED_STATUS_ID)) or (status_name.lower() in {"closed", "close"})
+    t_title = clean_answer(ticket.get("title") or ticket.get("subject"))
 
     return {
         "f_data_id": clean_answer(ticket.get("id")),
         "f_ticket_no": clean_answer(ticket.get("ticket_number")),
+        "title": t_title,
         "created_at": created_at_fmt,
         "raw_created_at": raw_created,
         "is_closed_in_faveo": is_closed
@@ -539,7 +539,7 @@ def close_faveo_ticket(ticket_id):
 
 
 # ============================================================
-# JOTFORM SUBMISSIONS (FIXED PARAMS & VISIBILITY)
+# JOTFORM SUBMISSIONS
 # ============================================================
 
 def fetch_eligible_submissions(start_lead_no=START_LEAD_NO):
@@ -633,15 +633,15 @@ def get_submission_data(submission_id):
 
     answers = content.get("answers", {})
 
-    # Extract Stage directly from JotForm Question 9 (exact API string)
-    current_stage_from_api = get_answer(answers, 9)
+    # Extract Stage directly from JotForm Question 9 (e.g. 'Stage - Upload PO/PI')
+    stage_from_api = get_answer(answers, 9)
 
     return {
         "lead_id": get_answer(answers, 251),
         "submission_id": str(submission_id),
         "operation": get_answer(answers, 3),
         "operation_type": get_answer(answers, 4),
-        "stage": current_stage_from_api,
+        "stage": stage_from_api,
         "created_at": get_answer(answers, 104),
         "raw_content": content
     }
@@ -681,15 +681,15 @@ def build_lead_state(all_rows):
     return lead_state
 
 
-def find_existing_sheet_row(lead_state, lead_id, stage, f_data_id):
+def find_existing_sheet_row_by_faveo_id(lead_state, lead_id, f_data_id):
+    """
+    Finds existing row strictly by Ticket ID to prevent duplicate rows.
+    """
     existing_rows = lead_state.get(lead_id, [])
-    target_stage = str(stage).strip()
     target_faveo = str(f_data_id).strip()
 
     for row in existing_rows:
-        row_stage = str(row.get("stage", "")).strip()
-        row_faveo = str(row.get("f_data_id", "")).strip()
-        if row_stage == target_stage and row_faveo == target_faveo:
+        if str(row.get("f_data_id", "")).strip() == target_faveo:
             return row
 
     return None
@@ -710,7 +710,7 @@ def append_new_row(worksheet, row_data):
 def run_sync():
     print()
     print("=" * 110)
-    print("FAVEO TICKET-LIST → EXACT API STAGE & ACCURATE IST MULTI-TICKET SYNC")
+    print("FAVEO TICKET-LIST → EXACT JOTFORM STAGE & ACCURATE TIMESTAMPS SYNC")
     print("=" * 110)
     print(f"Started: {get_ist_time()}")
 
@@ -759,6 +759,8 @@ def run_sync():
 
         lead_id = sub["lead_id"]
         operation = sub["operation"]
+        
+        # Pull current stage strictly from JotForm API (Question 9)
         stage_from_api = sub["stage"]
 
         if not lead_id:
@@ -785,7 +787,7 @@ def run_sync():
         # STEP 2: RETRIEVE ALL TICKETS FOR THIS LEAD FROM CACHED INDEX
         # ----------------------------------------------------
         lead_key = lead_id.strip().upper()
-        tickets_for_lead = faveo_lead_map.get(lead_key, [])
+        tickets_for_lead = list(faveo_lead_map.get(lead_key, []))
 
         # Fallback: if webhook ticket is missing or has an invalid timestamp, fetch directly from Faveo
         if webhook_tid:
@@ -830,95 +832,67 @@ def run_sync():
         latest_faveo_id = latest_ticket["f_data_id"]
 
         # ----------------------------------------------------
-        # STEP 4: CLOSE PREVIOUS ACTIVE ROWS IN GOOGLE SHEET
-        # ----------------------------------------------------
-        existing_sheet_rows = lead_state.get(lead_id, [])
-        closure_timestamp = get_ist_time()
-
-        for old_row in existing_sheet_rows:
-            old_faveo = old_row.get("f_data_id", "")
-            old_ticket = old_row.get("f_ticket_no", "")
-            old_status = old_row.get("closure_status", "")
-
-            # If it's an older ticket and currently Pending, close it
-            if old_faveo and str(old_faveo) != str(latest_faveo_id):
-                if not old_status or old_status.upper() == "PENDING":
-                    print(f"       → Closing older active ticket {old_ticket or old_faveo} in Faveo...")
-                    if close_faveo_ticket(old_faveo):
-                        print(f"       → CLOSED Ticket {old_ticket or old_faveo} in Faveo at {closure_timestamp}")
-                        closed_tickets_count += 1
-                    time.sleep(REQUEST_DELAY)
-
-                    row_num = old_row["row_number"]
-                    update_closure_time(worksheet, row_num, closure_timestamp)
-                    old_row["closure_status"] = closure_timestamp
-                    if row_num - 1 < len(all_rows):
-                        all_rows[row_num - 1][7] = closure_timestamp
-                    print(f"       → Updated Row {row_num} (Ticket {old_ticket or old_faveo}) Closed At: {closure_timestamp}")
-
-        # ----------------------------------------------------
-        # STEP 5: APPEND TICKETS TO GOOGLE SHEET
+        # STEP 4: APPEND TICKETS WITH CLEAN JOTFORM STAGE
         # ----------------------------------------------------
         for idx, t in enumerate(sorted_tickets):
             is_latest = (idx == total_tickets - 1)
-            t_faveo_id = t["f_data_id"]
+            t_faveo_id = str(t["f_data_id"]).strip()
             t_ticket_no = t["f_ticket_no"]
             t_created_at = t["created_at"] or get_ist_time()
+
+            # Column D strictly filled with stage_from_api (JotForm QID 9)
             t_stage = stage_from_api
 
-            existing_row = find_existing_sheet_row(lead_state, lead_id, t_stage, t_faveo_id)
-
+            # Sequential closure timing:
+            # - Older ticket closes when the NEXT ticket is created
+            # - Latest ticket remains Pending
             if is_latest:
-                if existing_row:
-                    already_processed_count += 1
-                    print(f"       → Latest Ticket {t_ticket_no} already in Sheet (Row {existing_row['row_number']}) → Skipped.")
-                    continue
-
-                closure_status = "Already Closed" if t["is_closed_in_faveo"] else "Pending"
-
-                row_payload = [
-                    lead_id,
-                    sub["submission_id"],
-                    operation,
-                    t_stage,
-                    t_faveo_id,
-                    t_ticket_no,
-                    t_created_at,
-                    closure_status
-                ]
-
-                append_new_row(worksheet, row_payload)
-                all_rows.append(row_payload)
-                new_row_number = len(all_rows)
-
-                if lead_id not in lead_state:
-                    lead_state[lead_id] = []
-                lead_state[lead_id].append({
-                    "row_number": new_row_number,
-                    "submission_id": sub["submission_id"],
-                    "operation": operation,
-                    "stage": t_stage,
-                    "f_data_id": t_faveo_id,
-                    "f_ticket_no": t_ticket_no,
-                    "created_at": t_created_at,
-                    "closure_status": closure_status
-                })
-
-                new_rows_count += 1
-                print(f"       → [LATEST TICKET APPENDED] Row {new_row_number}: {t_ticket_no} | Stage: '{t_stage}' | Created At (IST): {t_created_at} | Status: {closure_status}")
-
+                expected_status = "Already Closed" if t.get("is_closed_in_faveo") else "Pending"
             else:
-                if t_faveo_id and t_faveo_id != latest_faveo_id:
-                    if not t["is_closed_in_faveo"]:
-                        print(f"       → Closing older ticket {t_ticket_no} (ID: {t_faveo_id}) in Faveo...")
+                next_ticket = sorted_tickets[idx + 1]
+                expected_status = next_ticket["created_at"] or get_ist_time()
+
+            existing_row = find_existing_sheet_row_by_faveo_id(lead_state, lead_id, t_faveo_id)
+
+            if existing_row:
+                row_num = existing_row["row_number"]
+                sheet_updated = False
+
+                # Ensure Column D contains the clean JotForm API stage
+                if existing_row.get("stage") != t_stage:
+                    worksheet.update_cell(row_num, 4, t_stage)
+                    existing_row["stage"] = t_stage
+                    if row_num - 1 < len(all_rows):
+                        all_rows[row_num - 1][3] = t_stage
+                    print(f"       → Corrected Column D in Sheet (Row {row_num}) to '{t_stage}'")
+                    sheet_updated = True
+
+                # Update closure status if an older ticket was still marked Pending
+                if not is_latest and existing_row.get("closure_status", "").upper() == "PENDING":
+                    update_closure_time(worksheet, row_num, expected_status)
+                    existing_row["closure_status"] = expected_status
+                    if row_num - 1 < len(all_rows):
+                        all_rows[row_num - 1][7] = expected_status
+                    print(f"       → Closed Row {row_num} (Ticket {t_ticket_no}) at next stage start: {expected_status}")
+
+                    if not t.get("is_closed_in_faveo"):
                         if close_faveo_ticket(t_faveo_id):
-                            print(f"       → CLOSED Ticket {t_ticket_no} in Faveo at {closure_timestamp}")
                             closed_tickets_count += 1
                         time.sleep(REQUEST_DELAY)
 
-                if existing_row:
+                    sheet_updated = True
+
+                if not sheet_updated:
                     already_processed_count += 1
-                    continue
+                    print(f"       → Ticket {t_ticket_no} (Row {row_num}) already up-to-date → Skipped.")
+
+            else:
+                # Append new row
+                if not is_latest and not t.get("is_closed_in_faveo"):
+                    print(f"       → Closing older ticket {t_ticket_no} in Faveo...")
+                    if close_faveo_ticket(t_faveo_id):
+                        closed_tickets_count += 1
+                    time.sleep(REQUEST_DELAY)
 
                 row_payload = [
                     lead_id,
@@ -928,7 +902,7 @@ def run_sync():
                     t_faveo_id,
                     t_ticket_no,
                     t_created_at,
-                    closure_timestamp
+                    expected_status
                 ]
 
                 append_new_row(worksheet, row_payload)
@@ -945,11 +919,12 @@ def run_sync():
                     "f_data_id": t_faveo_id,
                     "f_ticket_no": t_ticket_no,
                     "created_at": t_created_at,
-                    "closure_status": closure_timestamp
+                    "closure_status": expected_status
                 })
 
                 new_rows_count += 1
-                print(f"       → [OLDER TICKET APPENDED] Row {new_row_number}: {t_ticket_no} | Stage: '{t_stage}' | Created At (IST): {t_created_at} | Closed At: {closure_timestamp}")
+                status_label = "LATEST" if is_latest else "OLDER"
+                print(f"       → [{status_label} TICKET APPENDED] Row {new_row_number}: {t_ticket_no} | Stage: '{t_stage}' | Created (IST): {t_created_at} | Status: {expected_status}")
 
     # ========================================================
     # FINAL SUMMARY
